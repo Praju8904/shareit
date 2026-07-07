@@ -5,6 +5,7 @@ import { useShare } from '../context/ShareContext';
 import { formatFileSize } from '../utils/fileChunker';
 import FileDropZone from '../components/FileDropZone';
 import TransferProgress from '../components/TransferProgress';
+import BottomNav from '../components/BottomNav';
 
 export default function Transfer() {
   const { peerId } = useParams();
@@ -41,7 +42,7 @@ export default function Transfer() {
 
   const handleFileSelect = (files) => {
     console.log('[Transfer] Starting transfer to peer:', peerId, 'files:', files.length);
-    startTransfer(peerId, files);
+    return startTransfer(peerId, files);
   };
 
   const handleCancel = (targetPeerId) => {
@@ -89,35 +90,7 @@ export default function Transfer() {
   const connectionIndicator = getConnectionIndicator();
 
   return (
-    <div className="min-h-screen bg-navy-900">
-      {/* ─── Top Bar ─── */}
-      <header className="sticky top-0 z-50 bg-navy-900/80 backdrop-blur-lg border-b border-navy-800">
-        <div className="max-w-4xl mx-auto px-6 py-3 flex items-center justify-between">
-          <Link
-            to="/"
-            className="flex items-center gap-2 text-slate-400 hover:text-cyan-400 transition-colors duration-200"
-          >
-            <ArrowLeft className="w-5 h-5" />
-            <span className="text-sm font-medium">Back</span>
-          </Link>
-
-          {/* Connection indicator */}
-          <div className="flex items-center gap-1.5" title={connected ? 'Connected' : 'Disconnected'}>
-            {connected ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]" />
-                <Wifi className="w-4 h-4 text-emerald-400" />
-              </>
-            ) : (
-              <>
-                <span className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]" />
-                <WifiOff className="w-4 h-4 text-red-400" />
-              </>
-            )}
-          </div>
-        </div>
-      </header>
-
+    <div className="min-h-screen bg-navy-900 pb-12 lg:pb-0">
       {/* ─── Main Content ─── */}
       <main className="max-w-4xl mx-auto p-6 space-y-6">
         {/* Peer info */}
@@ -221,6 +194,8 @@ export default function Transfer() {
           </div>
         </div>
       )}
+      
+      <BottomNav />
     </div>
   );
 }

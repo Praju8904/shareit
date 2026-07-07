@@ -5,6 +5,8 @@ import { formatFileSize } from '../utils/fileChunker';
 import DeviceList from '../components/DeviceList';
 import RoomPanel from '../components/RoomPanel';
 import TransferProgress from '../components/TransferProgress';
+import BottomNav from '../components/BottomNav';
+import SettingsPanel from '../components/SettingsPanel';
 
 const deviceIcons = {
   laptop: Laptop,
@@ -23,6 +25,10 @@ export default function Home() {
     createRoom,
     joinRoom,
     leaveRoom,
+    backendUrl,
+    connectionError,
+    transferSettings,
+    updateTransferSettings,
     incomingRequest,
     acceptTransfer,
     rejectTransfer,
@@ -50,10 +56,10 @@ export default function Home() {
   const hasActiveTransfers = transferProgress && Object.keys(transferProgress).length > 0;
 
   return (
-    <div className="min-h-screen bg-navy-900">
+    <div className="min-h-screen bg-navy-900 pb-12 lg:pb-0">
       {/* ─── Main Content ─── */}
-      <main className="max-w-6xl mx-auto p-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <main className="max-w-6xl mx-auto p-4 lg:p-6 pb-24 lg:pb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6">
           {/* Left: Nearby Devices */}
           <div className="card">
             <DeviceList
@@ -75,6 +81,16 @@ export default function Home() {
               onSendFile={handleSendFile}
             />
           </div>
+        </div>
+
+        <div className="mt-6">
+          <SettingsPanel
+            connected={connected}
+            backendUrl={backendUrl}
+            connectionError={connectionError}
+            transferSettings={transferSettings}
+            updateTransferSettings={updateTransferSettings}
+          />
         </div>
 
         {/* ─── Transfer Progress ─── */}
@@ -146,6 +162,8 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      <BottomNav />
     </div>
   );
 }

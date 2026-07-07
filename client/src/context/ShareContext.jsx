@@ -1,6 +1,8 @@
 import { createContext, useContext, useState, useEffect } from 'react';
 import { getOrCreateDeviceName, getOrCreateDeviceType } from '../utils/deviceName';
 import { isFirstLoad, markLoaded, saveDeviceName, getHistory, saveTransfer, deleteTransfer, clearHistory } from '../utils/storage';
+import { sanitizeDeviceName } from '../utils/security';
+import { getTransferSettings, saveTransferSettings } from '../utils/transferPolicy';
 import useSocket from '../hooks/useSocket';
 import useWebRTC from '../hooks/useWebRTC';
 
@@ -12,6 +14,7 @@ export function ShareProvider({ children }) {
   const [isEditingName, setIsEditingName] = useState(false);
   const [showNameTooltip, setShowNameTooltip] = useState(false);
   const [history, setHistory] = useState(() => getHistory());
+  const [transferSettings, setTransferSettings] = useState(() => getTransferSettings());
 
   useEffect(() => {
     if (isFirstLoad()) {
@@ -28,13 +31,15 @@ export function ShareProvider({ children }) {
     nearbyDevices,
     roomCode,
     roomPeers,
+    backendUrl,
+    connectionError,
     createRoom,
     joinRoom,
     leaveRoom,
   } = useSocket(deviceName, deviceType);
 
   const updateDeviceName = (newName) => {
-    const trimmed = newName.trim().slice(0, 24);
+    const trimmed = sanitizeDeviceName(newName);
     if (!trimmed) return;
     saveDeviceName(trimmed);
     setDeviceNameState(trimmed);
@@ -59,6 +64,12 @@ export function ShareProvider({ children }) {
     setHistory([]);
   };
 
+  const updateTransferSettings = (nextSettings) => {
+    const merged = { ...transferSettings, ...nextSettings };
+    saveTransferSettings(merged);
+    setTransferSettings(merged);
+  };
+
   const allPeers = [...(nearbyDevices || []), ...(roomPeers || [])];
   const {
     startTransfer,
@@ -68,6 +79,7 @@ export function ShareProvider({ children }) {
     rejectTransfer,
     cancelTransfer,
     connectionState,
+    diagnostics,
   } = useWebRTC(socket, addToHistory, allPeers);
 
   return (
@@ -89,9 +101,13 @@ export function ShareProvider({ children }) {
         nearbyDevices,
         roomCode,
         roomPeers,
+        backendUrl,
+        connectionError,
         createRoom,
         joinRoom,
         leaveRoom,
+        transferSettings,
+        updateTransferSettings,
         startTransfer,
         transferProgress,
         incomingRequest,
@@ -99,6 +115,7 @@ export function ShareProvider({ children }) {
         rejectTransfer,
         cancelTransfer,
         connectionState,
+        diagnostics,
       }}
     >
       {children}

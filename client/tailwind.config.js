@@ -64,6 +64,16 @@ export default {
           '100%': { boxShadow: '0 0 20px rgba(0,212,255,0.4)' },
         },
       },
+      spacing: {
+        'safe-bottom': 'env(safe-area-inset-bottom)',
+        'safe-top': 'env(safe-area-inset-top)',
+      },
+      minHeight: {
+        'touch': '44px',
+      },
+      minWidth: {
+        'touch': '44px',
+      },
     },
   },
   plugins: [],

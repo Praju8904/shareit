@@ -3,6 +3,7 @@ import { ArrowLeft, Clock, Trash2, ArrowUpRight, ArrowDownLeft, Search } from 'l
 import { Link } from 'react-router-dom';
 import { useShare } from '../context/ShareContext';
 import { formatFileSize, getFileIcon } from '../utils/fileChunker';
+import BottomNav from '../components/BottomNav';
 
 export default function History() {
   const { history, removeFromHistory, wipeHistory } = useShare();
@@ -108,12 +109,12 @@ export default function History() {
         {history?.length > 0 && (
           <div className="flex flex-col sm:flex-row justify-between gap-4 mb-8">
             {/* Tabs */}
-            <div className="flex gap-1 p-1 bg-navy-800 rounded-lg shrink-0 w-fit">
+            <div className="flex gap-1 p-1 bg-navy-800 rounded-lg shrink-0 w-fit max-w-full overflow-x-auto no-scrollbar">
               {['all', 'sent', 'received'].map(tab => (
                 <button
                   key={tab}
                   onClick={() => setFilter(tab)}
-                  className={`px-4 py-1.5 rounded-md text-sm font-medium capitalize transition-all duration-200 ${
+                  className={`px-4 py-1.5 rounded-md text-sm font-medium capitalize transition-all duration-200 whitespace-nowrap min-h-touch ${
                     filter === tab 
                       ? 'bg-navy-700 text-cyan-400 shadow-sm border border-cyan-500/20' 
                       : 'text-slate-400 hover:text-slate-200 hover:bg-navy-700/50'
@@ -250,6 +251,7 @@ export default function History() {
           )}
         </div>
       </main>
+      <BottomNav />
     </div>
   );
 }

@@ -1,5 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { chunkFile, generateTransferId } from '../utils/fileChunker';
+import { getAdaptiveChunkSize, getBufferThreshold } from '../utils/deviceDetection';
+import { hashBlob } from '../utils/security';
+import {
+  getTransferSettings,
+  isFileAllowed,
+  saveBlobToDisk,
+  validateFileBatch,
+} from '../utils/transferPolicy';
+import { clearIncompleteTransfer, saveIncompleteTransfer } from '../utils/storage';
+import { useWakeLock } from './useWakeLock';
 
 const ICE_CONFIG = {
   iceServers: [
@@ -8,11 +18,12 @@ const ICE_CONFIG = {
   ],
 };
 
-const CHUNK_SIZE = 16384;
-const BUFFER_THRESHOLD = 262144;
-const BUFFER_RESUME = 65536;
+const CHUNK_SIZE = getAdaptiveChunkSize();
+const BUFFER_THRESHOLD = getBufferThreshold();
+const BUFFER_RESUME = CHUNK_SIZE * 4;
 
 export default function useWebRTC(socket, addToHistory, allPeers) {
+  const { requestWakeLock, releaseWakeLock } = useWakeLock();
   const peerConnections = useRef(new Map());
   const dataChannels = useRef(new Map());
   
@@ -24,12 +35,14 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
   
   // Track queue-meta to send when channel opens
   const pendingMeta = useRef(new Map());
+  const retryCounts = useRef(new Map());
 
   // State
   const [fileQueue, setFileQueue] = useState([]);
   const [receiveQueue, setReceiveQueue] = useState([]);
   const [incomingRequest, setIncomingRequest] = useState(null);
   const [connectionState, setConnectionState] = useState({});
+  const [diagnostics, setDiagnostics] = useState({});
 
   // Refs for queue processing
   const processingQueue = useRef(false);
@@ -40,9 +53,22 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
   
   // For speed/ETA calculation
   const speedInterval = useRef(null);
+  const receiveQueueRef = useRef([]);
+
+  useEffect(() => {
+    receiveQueueRef.current = receiveQueue;
+  }, [receiveQueue]);
 
   const updateConnectionState = useCallback((peerId, state) => {
     setConnectionState(prev => ({ ...prev, [peerId]: state }));
+    setDiagnostics(prev => ({
+      ...prev,
+      [peerId]: {
+        ...(prev[peerId] || {}),
+        state,
+        updatedAt: Date.now(),
+      },
+    }));
   }, []);
 
   const updateQueueItem = useCallback((transferId, updates) => {
@@ -55,6 +81,22 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
     const p = allPeers?.find(p => p.peerId === peerId);
     return p?.deviceName || peerId?.substring(0, 8) || 'Unknown';
   }, [allPeers]);
+
+  const markPeerTransfersFailed = useCallback((peerId, reason = 'Connection lost') => {
+    setFileQueue(prev => prev.map(item => (
+      item.peerId === peerId && ['pending', 'sending'].includes(item.status)
+        ? { ...item, status: 'error', error: reason }
+        : item
+    )));
+    setReceiveQueue(prev => prev.map(item => {
+      if (item.peerId === peerId && ['receiving', 'verifying', 'retrying'].includes(item.status)) {
+        chunkBuffers.current.delete(item.transferId);
+        return { ...item, status: 'error', error: reason };
+      }
+      return item;
+    }));
+    releaseWakeLock();
+  }, [releaseWakeLock]);
 
   // Speed and ETA calculation interval
   useEffect(() => {
@@ -91,10 +133,20 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
     let currentReceiveTransferId = null;
 
     channel.onopen = () => console.log('[WebRTC] Receiver channel opened for', remotePeerId);
-    channel.onclose = () => dataChannels.current.delete(remotePeerId);
-    channel.onerror = (err) => console.error('[WebRTC] Receiver channel error:', err);
+    channel.onclose = () => {
+      dataChannels.current.delete(remotePeerId);
+      if (currentReceiveTransferId) {
+        chunkBuffers.current.delete(currentReceiveTransferId);
+      }
+    };
+    channel.onerror = (err) => {
+      console.error('[WebRTC] Receiver channel error:', err);
+      if (currentReceiveTransferId) {
+        chunkBuffers.current.delete(currentReceiveTransferId);
+      }
+    };
 
-    channel.onmessage = (event) => {
+    channel.onmessage = async (event) => {
       if (typeof event.data === 'string') {
         let msg;
         try { msg = JSON.parse(event.data); } catch (e) { return; }
@@ -113,6 +165,16 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
 
         if (msg.type === 'file-meta') {
           console.log('[WebRTC] Receiving file meta:', msg.name);
+          const settings = getTransferSettings();
+          if (!isFileAllowed({ mimeType: msg.mimeType }, settings)) {
+            channel.send(JSON.stringify({
+              type: 'file-rejected',
+              transferId: msg.transferId,
+              reason: 'Blocked by receive file type rules',
+            }));
+            return;
+          }
+
           currentReceiveTransferId = msg.transferId;
           
           chunkBuffers.current.set(msg.transferId, []);
@@ -132,9 +194,20 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
               progress: 0,
               bytesReceived: 0,
               totalChunks: msg.totalChunks,
+              checksum: msg.checksum,
               startTime: Date.now()
             }];
           });
+          saveIncompleteTransfer({
+            id: msg.transferId,
+            peerId: remotePeerId,
+            fileName: msg.name,
+            fileSize: msg.size,
+            mimeType: msg.mimeType,
+            timestamp: Date.now(),
+            status: 'receiving',
+          });
+          requestWakeLock();
         }
 
         if (msg.type === 'file-complete') {
@@ -144,27 +217,34 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
           
           setReceiveQueue(prev => {
             const item = prev.find(i => i.transferId === tId);
-            if (item && chunks) {
-              try {
-                const blob = new Blob(chunks, { type: item.mimeType });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = item.name;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                
-                // Memory management: Clean up chunk array after creating Blob
-                setTimeout(() => {
-                  URL.revokeObjectURL(url);
-                  chunkBuffers.current.delete(tId);
-                }, 60000);
-              } catch (err) {
-                console.error('[WebRTC] Error recreating file:', err);
+            const nextState = item
+              ? prev.map(i => i.transferId === tId ? { ...i, status: 'verifying', progress: 100 } : i)
+              : prev;
+            const activeTransfers = nextState.filter(i => i.status === 'sending' || i.status === 'receiving');
+            if (activeTransfers.length === 0) releaseWakeLock();
+            return nextState;
+          });
+
+          const item = receiveQueueRef.current.find(i => i.transferId === tId);
+          if (!item || !chunks) return;
+
+          try {
+            const blob = new Blob(chunks, { type: item.mimeType });
+            const checksum = await hashBlob(blob);
+            if (item.checksum && checksum !== item.checksum) {
+              chunkBuffers.current.delete(tId);
+              setReceiveQueue(prev => prev.map(i => (
+                i.transferId === tId ? { ...i, status: 'retrying', progress: 0, bytesReceived: 0 } : i
+              )));
+              if (channel.readyState === 'open') {
+                channel.send(JSON.stringify({ type: 'file-retry', transferId: tId }));
               }
+              return;
             }
-            if (item && addToHistory) {
+
+            const saved = await saveBlobToDisk(blob, item.name, getTransferSettings());
+            chunkBuffers.current.delete(tId);
+            if (saved && addToHistory) {
               addToHistory({
                 id: tId,
                 type: 'received',
@@ -177,12 +257,19 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
                 duration: Date.now() - (item.startTime || Date.now())
               });
             }
-            return prev.map(i => i.transferId === tId ? { ...i, status: 'complete', progress: 100 } : i);
-          });
-
-          // Acknowledge receipt back to sender
-          if (channel.readyState === 'open') {
-            channel.send(JSON.stringify({ type: 'file-ack', transferId: tId, status: 'received' }));
+            clearIncompleteTransfer(tId);
+            setReceiveQueue(prev => prev.map(i => (
+              i.transferId === tId ? { ...i, status: saved ? 'complete' : 'cancelled', progress: 100 } : i
+            )));
+            if (channel.readyState === 'open') {
+              channel.send(JSON.stringify({ type: 'file-ack', transferId: tId, status: saved ? 'received' : 'skipped' }));
+            }
+          } catch (err) {
+            console.error('[WebRTC] Error recreating file:', err);
+            chunkBuffers.current.delete(tId);
+            setReceiveQueue(prev => prev.map(i => (
+              i.transferId === tId ? { ...i, status: 'error' } : i
+            )));
           }
         }
       } else {
@@ -203,7 +290,7 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
         }
       }
     };
-  }, []);
+  }, [addToHistory, getPeerName, releaseWakeLock, requestWakeLock]);
 
   // ─── Sender Queue Processor (Backpressure Aware) ───────────────────────────
   const processQueue = useCallback(async () => {
@@ -234,6 +321,7 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
         try {
           const file = nextItem.file;
           const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+          const checksum = await hashBlob(file);
           
           // 1. Send file metadata
           channel.send(JSON.stringify({
@@ -243,7 +331,8 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
             size: file.size,
             mimeType: file.type || 'application/octet-stream',
             totalChunks,
-            chunkSize: CHUNK_SIZE
+            chunkSize: CHUNK_SIZE,
+            checksum
           }));
 
           currentGenerator.current = chunkFile(file);
@@ -288,6 +377,12 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
               currentGenerator.current = null;
               processingQueue.current = false;
               
+              setFileQueue(prev => {
+                const activeTransfers = prev.filter(i => (i.status === 'sending' || i.status === 'receiving') && i.transferId !== nextItem.transferId);
+                if (activeTransfers.length === 0) releaseWakeLock();
+                return prev;
+              });
+              
               // Move to next item in queue
               processQueue();
               return;
@@ -296,7 +391,7 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
             // 2. Send ArrayBuffer chunk
             channel.send(value.chunk);
             
-            const bytesSent = (value.index + 1) * value.chunk.byteLength;
+            const bytesSent = Math.min(file.size, (value.index * CHUNK_SIZE) + value.chunk.byteLength);
             const progress = Math.round((bytesSent / file.size) * 100);
             updateQueueItem(nextItem.transferId, { bytesSent, progress });
 
@@ -319,6 +414,7 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
           channel.bufferedAmountLowThreshold = BUFFER_RESUME;
           
           updateQueueItem(nextItem.transferId, { status: 'sending', startTime });
+          requestWakeLock();
           sendNextChunk();
 
         } catch (err) {
@@ -338,6 +434,13 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
             });
           }
           processingQueue.current = false;
+          
+          setFileQueue(prev => {
+            const activeTransfers = prev.filter(i => (i.status === 'sending' || i.status === 'receiving') && i.transferId !== nextItem.transferId);
+            if (activeTransfers.length === 0) releaseWakeLock();
+            return prev;
+          });
+          
           processQueue();
         }
       }, 0);
@@ -360,8 +463,11 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
     };
     pc.onconnectionstatechange = () => {
       updateConnectionState(remotePeerId, pc.connectionState);
+      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
+        markPeerTransfersFailed(remotePeerId);
+      }
     };
-  }, [socket, updateConnectionState]);
+  }, [markPeerTransfersFailed, socket, updateConnectionState]);
 
   useEffect(() => {
     if (!socket) return;
@@ -412,6 +518,23 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
     };
   }, [socket, setupPeerConnectionEvents, setupReceiverDataChannel, updateConnectionState]);
 
+  useEffect(() => {
+    return () => {
+      for (const channel of dataChannels.current.values()) {
+        channel.close();
+      }
+      for (const pc of peerConnections.current.values()) {
+        pc.close();
+      }
+      dataChannels.current.clear();
+      peerConnections.current.clear();
+      chunkBuffers.current.clear();
+      pendingMeta.current.clear();
+      retryCounts.current.clear();
+      releaseWakeLock();
+    };
+  }, [releaseWakeLock]);
+
   // ─── API Functions ─────────────────────────────────────────────────────────
 
   const initConnection = useCallback(async (peerId) => {
@@ -438,6 +561,26 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
               peerSessions.current.delete(peerId);
               setIncomingRequest(null);
               setFileQueue(prev => prev.map(i => i.peerId === peerId && i.status === 'pending' ? { ...i, status: 'cancelled' } : i));
+            }
+            if (msg.type === 'file-rejected') {
+              setFileQueue(prev => prev.map(i => (
+                i.transferId === msg.transferId ? { ...i, status: 'error', error: msg.reason } : i
+              )));
+            }
+            if (msg.type === 'file-retry') {
+              const attempts = retryCounts.current.get(msg.transferId) || 0;
+              if (attempts >= 1) {
+                setFileQueue(prev => prev.map(i => (
+                  i.transferId === msg.transferId ? { ...i, status: 'error', error: 'Checksum failed after retry' } : i
+                )));
+                return;
+              }
+              retryCounts.current.set(msg.transferId, attempts + 1);
+              setFileQueue(prev => prev.map(i => (
+                i.transferId === msg.transferId
+                  ? { ...i, status: 'pending', progress: 0, bytesSent: 0 }
+                  : i
+              )));
             }
           } catch (err) {}
         }
@@ -474,11 +617,15 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
   }, [socket, setupPeerConnectionEvents, processQueue, updateConnectionState]);
 
   const addFilesToQueue = useCallback((peerId, files) => {
-    if (!files || files.length === 0) return;
+    const validation = validateFileBatch(files, getTransferSettings());
+    if (!validation.ok) {
+      console.warn('[WebRTC] File batch blocked:', validation.message);
+      return { ok: false, message: validation.message };
+    }
     initConnection(peerId);
 
-    const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
-    const newItems = files.map(file => ({
+    const totalBytes = validation.totalBytes;
+    const newItems = validation.files.map(file => ({
       transferId: generateTransferId(),
       peerId,
       file,
@@ -514,35 +661,43 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
         pendingMeta.current.delete(peerId);
       }
     }
+    return { ok: true };
   }, [initConnection]);
 
   const cancelTransfer = useCallback((transferId) => {
-    setFileQueue(prev => prev.map(item => {
-      if (item.transferId === transferId) {
-        if (item.status === 'sending') {
-          currentGenerator.current = null;
-          isPaused.current = false;
-          processingQueue.current = false;
-          setTimeout(processQueue, 100); // trigger next
+    setFileQueue(prev => {
+      const nextState = prev.map(item => {
+        if (item.transferId === transferId) {
+          if (item.status === 'sending') {
+            currentGenerator.current = null;
+            isPaused.current = false;
+            processingQueue.current = false;
+            setTimeout(processQueue, 100); // trigger next
+          }
+          if (addToHistory) {
+            addToHistory({
+              id: item.transferId,
+              type: 'sent',
+              fileName: item.name,
+              fileSize: item.size,
+              mimeType: item.file?.type || 'application/octet-stream',
+              peer: getPeerName(item.peerId),
+              timestamp: Date.now(),
+              status: 'cancelled',
+              duration: item.startTime ? Date.now() - item.startTime : 0
+            });
+          }
+          return { ...item, status: 'cancelled' };
         }
-        if (addToHistory) {
-          addToHistory({
-            id: item.transferId,
-            type: 'sent',
-            fileName: item.name,
-            fileSize: item.size,
-            mimeType: item.file?.type || 'application/octet-stream',
-            peer: getPeerName(item.peerId),
-            timestamp: Date.now(),
-            status: 'cancelled',
-            duration: item.startTime ? Date.now() - item.startTime : 0
-          });
-        }
-        return { ...item, status: 'cancelled' };
-      }
-      return item;
-    }));
-  }, [processQueue, addToHistory, getPeerName]);
+        return item;
+      });
+      
+      const activeTransfers = nextState.filter(i => i.status === 'sending' || i.status === 'receiving');
+      if (activeTransfers.length === 0) releaseWakeLock();
+      
+      return nextState;
+    });
+  }, [processQueue, addToHistory, getPeerName, releaseWakeLock]);
 
   const cancelAll = useCallback(() => {
     setFileQueue(prev => {
@@ -572,9 +727,13 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
         isPaused.current = false;
         processingQueue.current = false;
       }
+      
+      const activeTransfers = next.filter(i => i.status === 'sending' || i.status === 'receiving');
+      if (activeTransfers.length === 0) releaseWakeLock();
+      
       return next;
     });
-  }, [addToHistory, getPeerName]);
+  }, [addToHistory, getPeerName, releaseWakeLock]);
 
   const acceptTransfer = useCallback(() => {
     if (incomingRequest?.from) {
@@ -622,6 +781,7 @@ export default function useWebRTC(socket, addToHistory, allPeers) {
     receiveQueue,
 
     connectionState,
+    diagnostics,
     closeConnection,
 
     // Aliases for compatibility with ShareContext

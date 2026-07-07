@@ -4,6 +4,14 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Proxy removed: connecting directly to backend avoids Vite ECONNABORTED errors
+    host: "0.0.0.0",
+    port: 5173,
+    proxy: {
+      '/socket.io': {
+        target: 'http://localhost:3002',
+        ws: true,
+        changeOrigin: true,
+      },
+    },
   },
 });

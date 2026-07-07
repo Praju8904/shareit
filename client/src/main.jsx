@@ -40,3 +40,11 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     </BrowserRouter>
   </React.StrictMode>
 );
+
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').catch((error) => {
+      console.warn('[PWA] Service worker registration failed:', error);
+    });
+  });
+}

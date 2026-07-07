@@ -13,14 +13,14 @@ export const devices = new Map();
 
 // ── Express + HTTP ──────────────────────────────────────────────────────────
 const app = express();
-app.use(cors({ origin: "http://localhost:5173" }));
+app.use(cors({ origin: true }));
 
 const httpServer = createServer(app);
 
 // ── Socket.IO ───────────────────────────────────────────────────────────────
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:5173",
+    origin: true,
     methods: ["GET", "POST"],
   },
 });
@@ -33,9 +33,10 @@ io.on("connection", (socket) => {
 });
 
 // ── Start ───────────────────────────────────────────────────────────────────
-const PORT = 3002;
-httpServer.listen(PORT, () => {
+const PORT = process.env.PORT || 3002;
+const HOST = process.env.HOST || "0.0.0.0";
+httpServer.listen(PORT, HOST, () => {
   console.log(
-    `[${new Date().toISOString()}] SERVER_START - ShareIt signaling server running on port ${PORT}`,
+    `[${new Date().toISOString()}] SERVER_START - ShareIt signaling server running on ${HOST}:${PORT}`,
   );
 });

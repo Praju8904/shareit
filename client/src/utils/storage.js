@@ -2,7 +2,8 @@ const KEYS = {
   DEVICE_NAME: 'shareit-device-name',
   DEVICE_TYPE: 'shareit-device-type',
   HISTORY: 'shareit-history',
-  FIRST_LOAD: 'shareit-first-load'
+  FIRST_LOAD: 'shareit-first-load',
+  INCOMPLETE_TRANSFERS: 'shareit-incomplete-transfers'
 };
 
 // Device name
@@ -85,6 +86,37 @@ export function deleteTransfer(id) {
     localStorage.setItem(KEYS.HISTORY, JSON.stringify(updated));
   } catch (e) {
     console.warn('[Storage] Failed to delete transfer', e);
+  }
+}
+
+export function getIncompleteTransfers() {
+  try {
+    const data = localStorage.getItem(KEYS.INCOMPLETE_TRANSFERS);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    console.warn('[Storage] Failed to get incomplete transfers', e);
+    return [];
+  }
+}
+
+export function saveIncompleteTransfer(entry) {
+  try {
+    const transfers = getIncompleteTransfers().filter((item) => item.id !== entry.id);
+    transfers.unshift(entry);
+    localStorage.setItem(KEYS.INCOMPLETE_TRANSFERS, JSON.stringify(transfers.slice(0, 50)));
+  } catch (e) {
+    console.warn('[Storage] Failed to save incomplete transfer', e);
+  }
+}
+
+export function clearIncompleteTransfer(id) {
+  try {
+    const transfers = getIncompleteTransfers().filter((item) => item.id !== id);
+    localStorage.setItem(KEYS.INCOMPLETE_TRANSFERS, JSON.stringify(transfers));
+  } catch (e) {
+    console.warn('[Storage] Failed to clear incomplete transfer', e);
   }
 }
 

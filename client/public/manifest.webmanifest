@@ -1,0 +1,17 @@
+{
+  "name": "ShareIt",
+  "short_name": "ShareIt",
+  "description": "Local peer-to-peer file sharing",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0A0F1E",
+  "theme_color": "#00D4FF",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
